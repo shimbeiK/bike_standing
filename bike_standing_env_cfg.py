@@ -21,7 +21,7 @@ from mjlab.viewer import ViewerConfig
 from mjlab.envs.mdp.actions import JointPositionActionCfg, JointVelocityActionCfg
 
 # mdp関数群のインポート (プロジェクトの構造に合わせてください)
-from mjlab.tasks.bike_task import mdp 
+from mjlab.tasks.bike_standing import mdp 
 
 
 def make_bike_v3_env_cfg() -> ManagerBasedRlEnvCfg:
@@ -32,25 +32,25 @@ def make_bike_v3_env_cfg() -> ManagerBasedRlEnvCfg:
   ##
 
   actor_terms = {
-    "base_roll": ObservationTermCfg(func=mdp.base_roll),
-    "base_gyro_filtered": ObservationTermCfg(func=mdp.base_gyro_filtered),
-    "drive_velocity": ObservationTermCfg(
-      func=mdp.drive_velocity,
-      params={"joint_name": ""}, # [Override] サブクラスで指定
-    ),
+    # "base_roll": ObservationTermCfg(func=mdp.BikeObservations.base_roll),
+    # "base_gyro": ObservationTermCfg(func=mdp.BikeObservations.base_gyro),
+    # "wheel_odometry": ObservationTermCfg(
+    #   func=mdp.BikeObservations.wheel_odometry,
+    #   params={"joint_name": ""}, # [Override] サブクラスで指定
+    # ),
   }
 
   observations = {
-    "actor": ObservationGroupCfg(
-      terms=actor_terms,
-      concatenate_terms=True,
-      enable_corruption=True,
-    ),
-    "critic": ObservationGroupCfg(
-      terms=actor_terms, # Criticにも同じ情報を与える
-      concatenate_terms=True,
-      enable_corruption=False,
-    ),
+    # "actor": ObservationGroupCfg(
+    #   terms=actor_terms,
+    #   concatenate_terms=True,
+    #   enable_corruption=True,
+    # ),
+    # "critic": ObservationGroupCfg(
+    #   terms=actor_terms, # Criticにも同じ情報を与える
+    #   concatenate_terms=True,
+    #   enable_corruption=False,
+    # ),
   }
 
   ##
@@ -58,18 +58,18 @@ def make_bike_v3_env_cfg() -> ManagerBasedRlEnvCfg:
   ##
 
   actions: dict[str, ActionTermCfg] = {
-    "steering": JointPositionActionCfg(
-      entity_name="robot",
-      actuator_names=(), # [Override] サブクラスで指定
-      scale=1.0,         # [Override] サブクラスで指定
-      use_default_offset=False,
-    ),
-    "drive": JointVelocityActionCfg(
-      entity_name="robot",
-      actuator_names=(), # [Override] サブクラスで指定
-      scale=1.0,         # [Override] サブクラスで指定
-      use_default_offset=False,
-    )
+    # "steering": JointPositionActionCfg(
+    #   entity_name="robot",
+    #   actuator_names=(), # [Override] サブクラスで指定
+    #   scale=1.0,         # [Override] サブクラスで指定
+    #   use_default_offset=False,
+    # ),
+    # "drive": JointVelocityActionCfg(
+    #   entity_name="robot",
+    #   actuator_names=(), # [Override] サブクラスで指定
+    #   scale=4.0,         # [Override] サブクラスで指定
+    #   use_default_offset=False,
+    # )
   }
 
   ##
@@ -103,19 +103,16 @@ def make_bike_v3_env_cfg() -> ManagerBasedRlEnvCfg:
   ##
 
   rewards = {
-    "survival": RewardTermCfg(func=mdp.survival_bonus, weight=0.0),
-    "upright": RewardTermCfg(
-      func=mdp.upright_posture,
-      weight=2.0,
-      params={"std": math.sqrt(0.25)},
-    ),
-    "odometry_penalty": RewardTermCfg(
-      func=mdp.position_deviation_penalty,
-      weight=-8.0,
-      params={"deadzone": 0.2},
-    ),
-    "steering_penalty": RewardTermCfg(func=mdp.action_rate_penalty, weight=0.0),
-    "torque_penalty": RewardTermCfg(func=mdp.motor_effort_penalty, weight=-0.4),
+    # "upright": RewardTermCfg(
+    #   func=mdp.BikeRewards.upright,
+    #   weight=2.0,
+    #   params={"std": math.sqrt(0.25)},
+    # ),
+    # "odometry_penalty": RewardTermCfg(
+    #   func=mdp.BikeRewards.odometry_penalty,
+    #   weight=-8.0,
+    #   params={"deadzone": 0.2},
+    # )
   }
 
   ##
@@ -123,15 +120,15 @@ def make_bike_v3_env_cfg() -> ManagerBasedRlEnvCfg:
   ##
 
   terminations = {
-    "time_out": TerminationTermCfg(func=mdp.time_out, time_out=True),
-    "fell_over": TerminationTermCfg(
-      func=mdp.roll_angle_limit,
-      params={"threshold": math.radians(45.0)},
-    ),
-    "out_of_bounds": TerminationTermCfg(
-      func=mdp.position_limit,
-      params={"limit_x": 10.5, "limit_y": 10.5},
-    ),
+    # "time_out": TerminationTermCfg(func=mdp.time_out, time_out=True),
+    # "fell_over": TerminationTermCfg(
+    #   func=mdp.BikeTerminations.roll_angle_limit,
+    #   params={"threshold": math.radians(45.0)},
+    # ),
+    # "out_of_bounds": TerminationTermCfg(
+    #   func=mdp.BikeTerminations.position_limit,
+    #   params={"limit_x": 10.5, "limit_y": 10.5},
+    # ),
   }
 
   ##
@@ -148,7 +145,8 @@ def make_bike_v3_env_cfg() -> ManagerBasedRlEnvCfg:
     scene=SceneCfg(
       terrain=TerrainEntityCfg(terrain_type="plane"), # 平地
       sensors=(), # デフォルトはセンサなし
-      num_envs=4096, # 並列環境数
+      num_envs=2048, # 並列環境数
+      env_spacing=3.0, # ★ここを追加！（各環境を3.0メートル間隔で格子状に配置する）
     ),
     observations=observations,
     actions=actions,
