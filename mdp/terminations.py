@@ -1,70 +1,71 @@
-from __future__ import annotations
+"""終了条件モジュール (Terminations).
 
-from typing import TYPE_CHECKING
+エピソードの終了判定関数を定義するクラス群。
+各クラスは static メソッドとして終了関数を持ち、
+TerminationTermCfg(func=BikeTerminations.fell_over, ...) のように登録して使う。
+
+終了条件一覧:
+    BikeTerminations.fell_over      : 転倒角度が閾値を超えた場合
+    BikeTerminations.out_of_bounds  : XY 座標が範囲外に出た場合
+"""
 
 import torch
 
 from mjlab.entity import Entity
+from mjlab.envs import ManagerBasedRlEnv
 from mjlab.managers.scene_entity_config import SceneEntityCfg
-from mjlab.utils.lab_api.math import quat_apply_inverse
 
-if TYPE_CHECKING:
-  from mjlab.envs import ManagerBasedRlEnv
+from .utils import compute_roll
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
 
-def roll_angle_limit(
-  env: ManagerBasedRlEnv,
-  threshold: float,
-  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-  """
-  機体のロール角（横傾き）が指定した閾値（ラジアン）を超えた場合に終了(True)を返す。
-  """
-  asset: Entity = env.scene[asset_cfg.name]
-  
-  # ルート（車体）のクォータニオンと重力ベクトルを取得 [B, 4], [B, 3]
-  body_quat_w = asset.data.root_link_quat_w
-  gravity_w = asset.data.gravity_vec_w
+class BikeTerminations:
+    """バイクバランス環境の終了条件関数をまとめたクラス.
 
-  # 重力ベクトルをローカル（車体）座標系に投影 [B, 3]
-  # 平地の場合、重力は[0, 0, -1]。車体がロール角phiだけ傾くと、ローカルのY成分は sin(phi) となる。
-  projected_gravity_b = quat_apply_inverse(body_quat_w, gravity_w)
-  
-  # Y成分からロール角の絶対値を逆算
-  roll_sin = torch.abs(projected_gravity_b[:, 1])
-  roll_angle = torch.asin(torch.clamp(roll_sin, min=-1.0, max=1.0))
-  
-  # 閾値を超えているか判定 [B]
-  return roll_angle > threshold
+    インスタンス化せずに static メソッドとして利用する。
+    すべての関数は bool テンソル (Shape: [N]) を返す。
+    """
 
+    @staticmethod
+    def fell_over(
+        env: ManagerBasedRlEnv,
+        limit_angle: float,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        """ロール角が limit_angle [rad] を超えたら True を返す.
 
-def position_limit(
-  env: ManagerBasedRlEnv,
-  limit_x: float,
-  limit_y: float,
-  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-  """
-  機体が初期位置から指定したXY座標の範囲（メートル）を越えた場合に終了(True)を返す。
-  """
-  asset: Entity = env.scene[asset_cfg.name]
-  
-  # 車体のワールド座標XYを取得 [B, 2]
-  root_xy_w = asset.data.root_link_pos_w[:, :2]
-  
-  # X軸またはY軸が閾値を超えているか判定 [B]
-  out_of_x = torch.abs(root_xy_w[:, 0]) > limit_x
-  out_of_y = torch.abs(root_xy_w[:, 1]) > limit_y
-  
-  return out_of_x | out_of_y
+        Args:
+            env         : 環境インスタンス
+            limit_angle : 転倒判定の閾値 [rad]
+            asset_cfg   : 対象エンティティ設定
 
+        Returns:
+            転倒フラグ (Shape: [N], dtype=bool)
+        """
+        asset: Entity = env.scene[asset_cfg.name]
+        roll = compute_roll(asset)
+        return torch.abs(roll) > limit_angle
 
-def time_out(env: ManagerBasedRlEnv) -> torch.Tensor:
-  """
-  最大ステップ数に到達した場合に終了(Truncate)を返す。
-  ※ mjlabの環境クラスではエピソード長が自動管理されています。
-  """
-  # 現在のステップ数が、環境に設定された最大ステップ数以上になったか判定 [B]
-  return env.episode_length_buf >= env.max_episode_length
+    @staticmethod
+    def out_of_bounds(
+        env: ManagerBasedRlEnv,
+        limit: float,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        """XY 平面内でロボットが limit [m] を超えたら True を返す.
+
+        ロボットの位置はエピソード原点からの相対座標で評価する。
+
+        Args:
+            env      : 環境インスタンス
+            limit    : 許容移動距離 [m]
+            asset_cfg: 対象エンティティ設定
+
+        Returns:
+            範囲外フラグ (Shape: [N], dtype=bool)
+        """
+        asset: Entity = env.scene[asset_cfg.name]
+        root_pos_local = asset.data.root_link_pos_w - env.scene.env_origins
+        root_xy = root_pos_local[:, :2]
+        return (torch.abs(root_xy[:, 0]) > limit) | (torch.abs(root_xy[:, 1]) > limit)

@@ -1,5 +1,5 @@
 from mjlab.tasks.registry import register_mjlab_task
-from mjlab.tasks.bike_task.rl import StandingOnPolicyRunner
+from mjlab.tasks.bike_standing.rl import StandingOnPolicyRunner
 
 from .env_cfgs import (
   bike_v3_env_cfg,

@@ -11,7 +11,7 @@ def bike_v3_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
   """Create RL runner configuration for bike V3 bicycle task."""
   
   # log_std_init: -0.3 を標準偏差の初期値(init_std)に変換
-  init_std_val = math.exp(-0.3)
+  init_std_val = math.exp(0)
 
   return RslRlOnPolicyRunnerCfg(
     actor=RslRlModelCfg(
@@ -32,19 +32,19 @@ def bike_v3_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
     algorithm=RslRlPpoAlgorithmCfg(
       value_loss_coef=1.0,
       use_clipped_value_loss=True,
-      clip_param=0.3,         # clip_range: 0.3
-      entropy_coef=0.05,      # コメント(0.01)と値(0.05)がありましたが0.05を仮設定
+      clip_param=0.2,         # clip_range: 0.3
+      entropy_coef=0.0,      # コメント(0.01)と値(0.05)がありましたが0.05を仮設定
       num_learning_epochs=10, # n_epochs: 10 に相当
       num_mini_batches=4,     # batch_sizeとn_stepsから適宜分割数を設定
       learning_rate=3e-4,     # learning_rate: 3e-4
       schedule="adaptive",
-      gamma=0.995,            # gamma: 0.995
+      gamma=0.99,            # gamma: 0.995
       lam=0.95,               # gae_lambda: 0.95
       desired_kl=0.01,
-      max_grad_norm=0.3,      # max_grad_norm: 0.3
+      max_grad_norm=1.0,      # max_grad_norm: 0.3
     ),
     experiment_name="bike_v3",
-    save_interval=50,
+    save_interval=100,
     num_steps_per_env=24,   # n_steps: 8192
-    max_iterations=3_000,
+    max_iterations=1_500,
   )

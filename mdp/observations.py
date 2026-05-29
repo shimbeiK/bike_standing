@@ -1,86 +1,115 @@
-from __future__ import annotations
+"""観測モジュール (Observations).
 
-from typing import TYPE_CHECKING
+ポリシーへ渡す観測量を定義するクラス群。
+各クラスは static メソッドとして観測関数を持ち、
+ObservationTermCfg(func=BikeObservations.base_roll) のように登録して使う。
+
+観測一覧:
+    BikeObservations.base_roll       : 本体の転倒角度  [rad]         Shape: [N, 1]
+    BikeObservations.base_gyro       : 本体の転倒角速度 [rad/s]       Shape: [N, 1]
+    BikeObservations.wheel_odometry  : 後輪の累積回転量 [rad]         Shape: [N, 1]
+"""
+
+import math
 
 import torch
-import numpy as np
-from scipy.spatial.transform import Rotation as R
 
 from mjlab.entity import Entity
+from mjlab.envs import ManagerBasedRlEnv
 from mjlab.managers.scene_entity_config import SceneEntityCfg
-from mjlab.utils.lab_api.math import quat_apply_inverse
 
-if TYPE_CHECKING:
-  from mjlab.envs import ManagerBasedRlEnv
+from .utils import compute_roll
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
-def base_roll(
-    env: ManagerBasedRlEnv,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    """機体のロール角を取得し、設定されていればノイズを付与する。"""
-    asset: Entity = env.scene[asset_cfg.name]
-    
-    # ルートのクォータニオンと重力ベクトルからロール角を計算
-    body_quat_w = asset.data.root_link_quat_w
-    gravity_w = asset.data.gravity_vec_w
-    projected_gravity_b = quat_apply_inverse(body_quat_w, gravity_w)
-    
-    roll_sin = torch.abs(projected_gravity_b[:, 1])
-    roll_angle = torch.asin(torch.clamp(roll_sin, min=-1.0, max=1.0))
 
-    # ノイズの付与
-    if getattr(env.cfg.env, "real_syncro_noise", False):
-        noise = torch.randn_like(roll_angle) * np.deg2rad(1.0)
-        roll_angle += noise
-        
-    return roll_angle.unsqueeze(1) # [B, 1]
+class BikeObservations:
+    """バイクバランス環境の観測関数をまとめたクラス.
 
-def base_gyro_filtered(
-    env: ManagerBasedRlEnv,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    """IMUから角速度を取得し、ノイズ付与とローパスフィルタを適用する。"""
-    asset: Entity = env.scene[asset_cfg.name]
-    
-    # ローカル座標系の角速度のX成分 (ロール軸の角速度) [B]
-    raw_angular_vel = asset.data.root_link_ang_vel_b[:, 0]
-    
-    # ノイズの付与
-    noisy_angular_vel = raw_angular_vel + torch.randn_like(raw_angular_vel) * np.deg2rad(0.4)
-    
-    # フィルタの更新 (env側に状態を保持している想定)
-    alpha = getattr(env, "alpha", 0.7)
-    if not hasattr(env, "filtered_gy"):
-        env.filtered_gy = torch.zeros_like(noisy_angular_vel)
-        
-    env.filtered_gy = -(alpha * noisy_angular_vel + (1 - alpha) * env.filtered_gy)
-    
-    # クリップ処理
-    if getattr(env.cfg.env, "real_syncro_noise", False):
-        env.filtered_gy = torch.clamp(env.filtered_gy, min=-2.0, max=2.0)
-        
-    return env.filtered_gy.unsqueeze(1) # [B, 1]
+    インスタンス化せずに static メソッドとして利用する。
+    """
 
-def drive_velocity(
-    env: ManagerBasedRlEnv,
-    joint_name: str = "back_tire_pitch",
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    """後輪の回転速度を取得し、ノイズを付与する。"""
-    asset: Entity = env.scene[asset_cfg.name]
-    
-    # 指定したジョイントのインデックスを取得
-    joint_ids = asset.find_joints([joint_name])[0]
-    
-    # ジョイントの速度を取得 [B]
-    wheel_vel = asset.data.joint_vel[:, joint_ids].squeeze(-1)
-    
-    # ノイズの付与
-    noisy_drive_vel = wheel_vel + torch.randn_like(wheel_vel) * np.deg2rad(0.3)
-    
-    # 他の報酬計算等で使うために保存
-    env.drive_vel = noisy_drive_vel
-    
-    return noisy_drive_vel.unsqueeze(1) # [B, 1]
+    @staticmethod
+    def base_roll(
+        env: ManagerBasedRlEnv,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        """本体の転倒角度（ロール角）を返す [rad].
+
+        実機傾斜計に合わせてガウスノイズ (±1 deg) を付加する。
+
+        Args:
+            env      : 環境インスタンス
+            asset_cfg: 対象エンティティ設定
+
+        Returns:
+            ロール角 + ノイズ (Shape: [N, 1])
+        """
+        asset: Entity = env.scene[asset_cfg.name]
+        roll = compute_roll(asset)
+
+        noise = torch.randn_like(roll) * math.radians(1.0)
+        return (roll + noise).unsqueeze(1)
+
+    @staticmethod
+    def base_gyro(
+        env: ManagerBasedRlEnv,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        """本体の転倒角速度（ロール方向の角速度）を返す [rad/s].
+
+        実機ジャイロに合わせてガウスノイズ (±0.4 deg/s) と
+        一次ローパスフィルタ (α=0.7) を適用する。
+        フィルタ状態 ``env._gyro_filtered`` はイベントでリセットされる。
+
+        Args:
+            env      : 環境インスタンス
+            asset_cfg: 対象エンティティ設定
+
+        Returns:
+            フィルタ済み角速度 (Shape: [N, 1])
+        """
+        asset: Entity = env.scene[asset_cfg.name]
+        raw_gyro = asset.data.root_link_ang_vel_b[:, 0]  # ボディ x 軸 = ロール方向
+
+        noise = torch.randn_like(raw_gyro) * math.radians(0.4)
+        noisy_gyro = raw_gyro + noise
+
+        alpha = 0.7
+        if not hasattr(env, "_gyro_filtered"):
+            env._gyro_filtered = torch.zeros_like(noisy_gyro)
+        env._gyro_filtered = alpha * noisy_gyro + (1.0 - alpha) * env._gyro_filtered
+
+        filtered = torch.clamp(env._gyro_filtered, min=-2.0, max=2.0)
+        return filtered.unsqueeze(1)
+
+    @staticmethod
+    def wheel_odometry(
+        env: ManagerBasedRlEnv,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        """後輪の累積回転量（オドメトリ）を返す [rad].
+
+        毎ステップの後輪角速度を積分して累積変位を求める。
+        積分状態 ``env._wheel_odometry`` はイベントでリセットされる。
+
+        Args:
+            env      : 環境インスタンス
+            asset_cfg: 対象エンティティ設定
+
+        Returns:
+            累積回転量 (Shape: [N, 1])
+        """
+        asset: Entity = env.scene[asset_cfg.name]
+        joint_ids = asset.find_joints(["back_tire_pitch"])[0]
+        wheel_vel = asset.data.joint_vel[:, joint_ids].squeeze(-1)  # [N]
+
+        noise = torch.randn_like(wheel_vel) * math.radians(0.3)
+        wheel_vel_noisy = wheel_vel + noise
+
+        dt = env.cfg.sim.mujoco.timestep * env.cfg.decimation
+        if not hasattr(env, "_wheel_odometry"):
+            env._wheel_odometry = torch.zeros(env.num_envs, device=env.device)
+        env._wheel_odometry += wheel_vel_noisy * dt
+
+        return env._wheel_odometry.unsqueeze(1)

@@ -1,88 +1,81 @@
-from __future__ import annotations
+"""報酬モジュール (Rewards).
 
-from typing import TYPE_CHECKING
+強化学習の報酬関数を定義するクラス群。
+各クラスは static メソッドとして報酬関数を持ち、
+RewardTermCfg(func=BikeRewards.upright, weight=4.0) のように登録して使う。
+
+報酬一覧:
+    BikeRewards.upright          : 転倒角度が小さいほど高報酬  [0, 1]
+    BikeRewards.odometry_penalty : 後輪累積移動量のペナルティ  [0, ∞)
+"""
+
+import math
 
 import torch
 
 from mjlab.entity import Entity
+from mjlab.envs import ManagerBasedRlEnv
 from mjlab.managers.scene_entity_config import SceneEntityCfg
-from mjlab.utils.lab_api.math import quat_apply_inverse
 
-if TYPE_CHECKING:
-  from mjlab.envs import ManagerBasedRlEnv
+from .utils import compute_roll
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
-def survival_bonus(env: ManagerBasedRlEnv) -> torch.Tensor:
-  """倒れずに生き残っていることに対する継続ボーナス。"""
-  # env.num_envs (並列環境数) 分の 1.0 のテンソルを返す
-  return torch.ones(env.num_envs, device=env.device)
 
+class BikeRewards:
+    """バイクバランス環境の報酬関数をまとめたクラス.
 
-def upright_posture(
-  env: ManagerBasedRlEnv,
-  std: float,
-  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-  """機体のロール角（横傾き）をゼロに保つ報酬。"""
-  asset: Entity = env.scene[asset_cfg.name]
-  
-  # ルート（車体）のクォータニオンと重力ベクトルを取得 [B, 4], [B, 3]
-  body_quat_w = asset.data.root_link_quat_w
-  gravity_w = asset.data.gravity_vec_w
+    インスタンス化せずに static メソッドとして利用する。
+    """
 
-  # 重力ベクトルをローカル（車体）座標系に投影 [B, 3]
-  projected_gravity_b = quat_apply_inverse(body_quat_w, gravity_w)
-  
-  # Y軸方向の重力成分の2乗（これがロール傾きに相当します）
-  roll_squared = torch.square(projected_gravity_b[:, 1])
-  
-  # ガウス関数(exp)で0に近いほど1（最大報酬）になるようスケーリング
-  return torch.exp(-roll_squared / std**2)
+    @staticmethod
+    def upright(
+        env: ManagerBasedRlEnv,
+        max_angle: float = math.radians(10.0),
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        """転倒角度が小さいほど高い報酬を返す.
 
+        正立 (roll = 0) で 1.0、|roll| >= max_angle で 0.0 になるよう
+        線形に正規化し、下限 0 でクランプする。
 
-def position_deviation_penalty(
-  env: ManagerBasedRlEnv,
-  deadzone: float = 0.2,
-  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-  """その場に留まらず移動してしまった距離(オドメトリ)に対するペナルティ。"""
-  asset: Entity = env.scene[asset_cfg.name]
-  
-  # 車体のワールド座標XY [B, 2]
-  root_pos_xy = asset.data.root_link_pos_w[:, :2]
-  
-  # 原点からの距離 [B]
-  distance = torch.norm(root_pos_xy, dim=-1)
-  
-  # デッドゾーン（許容範囲）を超えた分をコストとして返す
-  cost = torch.clamp(distance - deadzone, min=0.0)
-  return cost
+        報酬の計算式::
 
+            r = clamp((max_angle - |roll|) / max_angle, min=0)
 
-def action_rate_penalty(
-  env: ManagerBasedRlEnv,
-) -> torch.Tensor:
-  """急激な操作（ステアリングやトルクの急変）に対するペナルティ。
-  
-  mjlabの標準的なアプローチとして、キューを手動で管理するのではなく、
-  ActionManagerに保存されている前回のアクション(prev_action)を使用します。
-  """
-  # 現在の行動と前回の行動の差分 [B, num_actions]
-  action_diff = env.action_manager.action - env.action_manager.prev_action
-  
-  # 差分の2乗和を返す [B]
-  return torch.sum(torch.square(action_diff), dim=1)
+        Args:
+            env      : 環境インスタンス
+            max_angle: 転倒とみなすロール角の上限 [rad]（デフォルト: 10 deg）
+            asset_cfg: 対象エンティティ設定
 
+        Returns:
+            正規化転倒報酬 (Shape: [N])
+        """
+        asset: Entity = env.scene[asset_cfg.name]
+        roll = compute_roll(asset)
+        normalized = (max_angle - torch.abs(roll)) / max_angle
+        return torch.clamp(normalized, min=0.0)
 
-def motor_effort_penalty(
-  env: ManagerBasedRlEnv,
-  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-  """モータのトルク（消費エネルギー）に対するペナルティ。"""
-  asset: Entity = env.scene[asset_cfg.name]
-  
-  # アクチュエータが実際に出力した力（トルク） [B, num_actuators]
-  applied_effort = asset.data.applied_effort
-  
-  return torch.sum(torch.square(applied_effort), dim=1)
+    @staticmethod
+    def odometry_penalty(
+        env: ManagerBasedRlEnv,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,  # noqa: ARG004
+    ) -> torch.Tensor:
+        """後輪の累積オドメトリ量をペナルティとして返す.
+
+        その場に留まらせるため、後輪の累積回転量（絶対値）をコストとして返す。
+        報酬重みは cfg 側で負符号（例: weight=-0.5）にする。
+
+        ``env._wheel_odometry`` は ``BikeObservations.wheel_odometry`` が
+        積分・更新する。リセットは ``BikeEvents.reset_internal_state`` が担う。
+
+        Args:
+            env      : 環境インスタンス
+            asset_cfg: 未使用（シグネチャ統一のため保持）
+
+        Returns:
+            累積回転量の絶対値 (Shape: [N])
+        """
+        if not hasattr(env, "_wheel_odometry"):
+            return torch.zeros(env.num_envs, device=env.device)
+        return torch.abs(env._wheel_odometry)
