@@ -1,3 +1,3 @@
-from mjlab.tasks.bike_task.rl.runner import (
+from mjlab.tasks.bike_standing.rl.runner import (
   StandingOnPolicyRunner as StandingOnPolicyRunner,
 )

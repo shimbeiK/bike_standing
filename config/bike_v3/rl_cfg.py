@@ -15,7 +15,7 @@ def bike_v3_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
 
   return RslRlOnPolicyRunnerCfg(
     actor=RslRlModelCfg(
-      hidden_dims=(128, 128),  # net_arch: [128, 128]
+      hidden_dims=(128, 64),  # net_arch: [128, 64]
       activation="elu",      # sb3のデフォルトはtanh等ですが、mjlabの標準に合わせeluとしています
       obs_normalization=False,
       distribution_cfg={     # 初期行動の分散を定義
@@ -25,7 +25,7 @@ def bike_v3_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
       },
     ),
     critic=RslRlModelCfg(
-      hidden_dims=(128, 128),
+      hidden_dims=(128, 64),
       activation="elu",
       obs_normalization=False,
     ),

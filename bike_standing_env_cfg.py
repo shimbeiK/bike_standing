@@ -145,7 +145,7 @@ def make_bike_v3_env_cfg() -> ManagerBasedRlEnvCfg:
     scene=SceneCfg(
       terrain=TerrainEntityCfg(terrain_type="plane"), # 平地
       sensors=(), # デフォルトはセンサなし
-      num_envs=2048, # 並列環境数
+      num_envs=4096, # 並列環境数
       env_spacing=3.0, # ★ここを追加！（各環境を3.0メートル間隔で格子状に配置する）
     ),
     observations=observations,

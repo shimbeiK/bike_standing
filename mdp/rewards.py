@@ -21,6 +21,8 @@ from .utils import compute_roll
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
+def _tolerance(x: torch.Tensor, margin: float) -> torch.Tensor:
+    return torch.exp(-0.5 * (x / margin) ** 2)
 
 class BikeRewards:
     """バイクバランス環境の報酬関数をまとめたクラス.
@@ -31,51 +33,51 @@ class BikeRewards:
     @staticmethod
     def upright(
         env: ManagerBasedRlEnv,
-        max_angle: float = math.radians(10.0),
+        margin: float = math.radians(5.0), # marginに変更
         asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     ) -> torch.Tensor:
-        """転倒角度が小さいほど高い報酬を返す.
-
-        正立 (roll = 0) で 1.0、|roll| >= max_angle で 0.0 になるよう
-        線形に正規化し、下限 0 でクランプする。
-
-        報酬の計算式::
-
-            r = clamp((max_angle - |roll|) / max_angle, min=0)
-
-        Args:
-            env      : 環境インスタンス
-            max_angle: 転倒とみなすロール角の上限 [rad]（デフォルト: 10 deg）
-            asset_cfg: 対象エンティティ設定
-
-        Returns:
-            正規化転倒報酬 (Shape: [N])
-        """
         asset: Entity = env.scene[asset_cfg.name]
         roll = compute_roll(asset)
-        normalized = (max_angle - torch.abs(roll)) / max_angle
-        return torch.clamp(normalized, min=0.0)
+        # 線形からガウス型（_tolerance）に変更
+        return _tolerance(roll, margin=margin)
 
     @staticmethod
     def odometry_penalty(
         env: ManagerBasedRlEnv,
-        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,  # noqa: ARG004
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+        max_odom: float = math.radians(1800.0),
     ) -> torch.Tensor:
-        """後輪の累積オドメトリ量をペナルティとして返す.
+        """後輪の累積回転量（オドメトリ）に対するペナルティ."""
+        asset: Entity = env.scene[asset_cfg.name]
+        joint_ids = asset.find_joints(["back_tire_pitch"])[0]
 
-        その場に留まらせるため、後輪の累積回転量（絶対値）をコストとして返す。
-        報酬重みは cfg 側で負符号（例: weight=-0.5）にする。
+        # 現在の後輪の角速度を取得 [N]
+        wheel_vel = asset.data.joint_vel[:, joint_ids].squeeze(-1)
 
-        ``env._wheel_odometry`` は ``BikeObservations.wheel_odometry`` が
-        積分・更新する。リセットは ``BikeEvents.reset_internal_state`` が担う。
+        # 1ステップあたりの時間 (dt) を計算
+        dt = env.cfg.sim.mujoco.timestep * env.cfg.decimation
 
-        Args:
-            env      : 環境インスタンス
-            asset_cfg: 未使用（シグネチャ統一のため保持）
+        # 報酬用の内部状態が存在しない場合は初期化
+        if not hasattr(env, "_reward_wheel_odometry"):
+            env._reward_wheel_odometry = torch.zeros(env.num_envs, device=env.device)
 
-        Returns:
-            累積回転量の絶対値 (Shape: [N])
-        """
-        if not hasattr(env, "_wheel_odometry"):
-            return torch.zeros(env.num_envs, device=env.device)
-        return torch.abs(env._wheel_odometry)
+        # オドメトリを更新
+        env._reward_wheel_odometry += wheel_vel * dt
+
+        # 上限でクリップして絶対値を返す
+        odom_abs = torch.abs(env._reward_wheel_odometry)
+        return torch.clamp(odom_abs, max=max_odom)
+
+    @staticmethod
+    def wheel_velocity_penalty(
+        env: ManagerBasedRlEnv,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+        margin: float = math.radians(5.0),
+    ) -> torch.Tensor:
+        asset: Entity = env.scene[asset_cfg.name]
+        joint_ids = asset.find_joints(["back_tire_pitch"])[0]
+
+        # 現在の後輪の角速度を取得 [N]
+        wheel_vel = asset.data.joint_vel[:, joint_ids].squeeze(-1)
+
+        return 1.0 - _tolerance(wheel_vel, margin=margin)
